@@ -1,10 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Speech.Recognition;
 using System.Speech.Synthesis;
 using System.Text;
@@ -60,7 +61,9 @@ namespace Randomizer.SMZ3.Tracking
         private Dictionary<string, Progression> _progression = new();
         private bool _alternateTracker;
         private HashSet<SchrodingersString> _saidLines = new();
-        private bool _beatenGame;
+
+        [DllImport("winmm.dll")]
+        public static extern int waveInGetNumDevs();
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Tracker"/> class.
@@ -379,6 +382,11 @@ namespace Randomizer.SMZ3.Tracking
 
             try
             {
+                if (waveInGetNumDevs() == 0)
+                {
+                    _logger.LogWarning("No microphone device found.");
+                    return false;
+                }
                 _recognizer.SetInputToDefaultAudioDevice();
                 MicrophoneInitialized = true;
                 return true;
@@ -865,7 +873,7 @@ namespace Randomizer.SMZ3.Tracking
         /// <summary>
         /// Pauses the timer, saving the elapsed time
         /// </summary>
-        public virtual Action? PauseTimer(bool addUndo = true)
+        public virtual void PauseTimer()
         {
             _undoSavedTime = SavedElapsedTime;
             _undoStartTime = _startTime;
@@ -875,24 +883,11 @@ namespace Randomizer.SMZ3.Tracking
 
             Say(Responses.TimerPaused);
 
-            if (addUndo)
+            AddUndo(() =>
             {
-                AddUndo(() =>
-                {
-                    SavedElapsedTime = _undoSavedTime;
-                    _startTime = _undoStartTime;
-                });
-                return null;
-            }
-            else
-            {
-                return () =>
-                {
-                    SavedElapsedTime = _undoSavedTime;
-                    _startTime = _undoStartTime;
-                };
-            }
-            
+                SavedElapsedTime = _undoSavedTime;
+                _startTime = _undoStartTime;
+            });
         }
 
         /// <summary>
@@ -1316,7 +1311,7 @@ namespace Randomizer.SMZ3.Tracking
             Action? undoTrackDungeonTreasure = null;
 
             // If this was not gifted to the player, try to clear the location
-            if (!giftedItem && item.InternalItemType != ItemType.Nothing)
+            if (!giftedItem)
             {
                 if (location == null)
                 {
@@ -1899,8 +1894,7 @@ namespace Randomizer.SMZ3.Tracking
         /// </summary>
         /// <param name="dungeon">The dungeon that was cleared.</param>
         /// <param name="confidence">The speech recognition confidence.</param>
-        /// <param name="autoTracked">If this was cleared by the auto tracker</param>
-        public void MarkDungeonAsCleared(DungeonInfo dungeon, float? confidence = null, bool autoTracked = false)
+        public void MarkDungeonAsCleared(DungeonInfo dungeon, float? confidence = null)
         {
             UpdateTrackerProgression = true;
 
@@ -1919,18 +1913,14 @@ namespace Randomizer.SMZ3.Tracking
             dungeon.Cleared = true;
             Say(Responses.DungeonBossCleared.Format(dungeon.Name, dungeon.Boss));
             IsDirty = true;
-            RestartIdleTimers();
-            OnDungeonUpdated(new TrackerEventArgs(confidence));
 
-            if (!autoTracked)
+            OnDungeonUpdated(new TrackerEventArgs(confidence));
+            AddUndo(() =>
             {
-                AddUndo(() =>
-                {
-                    UpdateTrackerProgression = true;
-                    dungeon.Cleared = false;
-                    addedEvent.IsUndone = true;
-                });
-            }
+                UpdateTrackerProgression = true;
+                dungeon.Cleared = false;
+                addedEvent.IsUndone = true;
+            });
         }
 
         /// <summary>
@@ -1942,8 +1932,7 @@ namespace Randomizer.SMZ3.Tracking
         /// <see langword="false"/> if the boss was simply "tracked".
         /// </param>
         /// <param name="confidence">The speech recognition confidence.</param>
-        /// <param name="autoTracked">If this was tracked by the auto tracker</param>
-        public void MarkBossAsDefeated(BossInfo boss, bool admittedGuilt = true, float? confidence = null, bool autoTracked = false)
+        public void MarkBossAsDefeated(BossInfo boss, bool admittedGuilt = true, float? confidence = null)
         {
             if (boss.Defeated)
             {
@@ -1967,17 +1956,12 @@ namespace Randomizer.SMZ3.Tracking
             IsDirty = true;
             UpdateTrackerProgression = true;
 
-            RestartIdleTimers();
             OnBossUpdated(new(confidence));
-
-            if (!autoTracked)
+            AddUndo(() =>
             {
-                AddUndo(() =>
-                {
-                    boss.Defeated = false;
-                    addedEvent.IsUndone = true;
-                });
-            }
+                boss.Defeated = false;
+                addedEvent.IsUndone = true;
+            });
         }
 
         /// <summary>
@@ -2194,32 +2178,6 @@ namespace Randomizer.SMZ3.Tracking
         {
             CurrentMap = map;
             MapUpdated?.Invoke(this, EventArgs.Empty);
-        }
-
-        /// <summary>
-        /// Called when the game is beaten by entering triforce room
-        /// or entering the ship after beating both bosses
-        /// </summary>
-        /// <param name="autoTracked">If this was triggered by the auto tracker</param>
-        public void GameBeaten(bool autoTracked)
-        {
-            if (!_beatenGame)
-            {
-                _beatenGame = true;
-                var pauseUndo = PauseTimer(false);
-                Say(x => x.BeatGame);
-                if (!autoTracked)
-                {
-                    AddUndo(() =>
-                    {
-                        _beatenGame = false;
-                        if (pauseUndo != null)
-                        {
-                            pauseUndo();
-                        }
-                    });
-                }
-            }
         }
 
         internal void RestartIdleTimers()
